@@ -1,6 +1,6 @@
 schema = 1
-id = "patrol"
-name = "PityPlan Patrol"
-version = "0.1.0"
-description = "Scheduled prompt into a fixed omp block."
+id = "scheduler"
+name = "Prompt Scheduler"
+version = "0.2.0"
+description = "Timed prompts delivered to fixed omp agent blocks."
 window = "window.luau"

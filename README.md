@@ -1,69 +1,82 @@
-# tern-patrol-plugin
+# tern-scheduler
 
-A Tern plugin that delivers a prompt into one fixed omp block on a schedule.
+Timed prompts delivered to fixed omp agent blocks, as a [Tern](https://tern.so)
+plugin. Each task in `tasks.json` has a prompt and an interval; when it is due,
+the prompt is sent to that task's block — opened on first use, then reused.
 
-Tern owns the clock: the window half ticks every 30 seconds, keeps the next run
-in `tern.kv`, and sends `prompt.md` to a single agent block — creating that block
-on first use, then reusing it. Nothing is appended to an unrelated conversation.
+Author: He lijun
 
-## Files
+## Install
 
-| File | Purpose |
-| --- | --- |
-| `plugin.toml` | Tern plugin manifest (`schema = 1`, window half only) |
-| `window.luau` | Schedule, delivery, and the `Patrol:` palette commands |
-| `prompt.md` | The text delivered into the block |
+```bash
+tern plugin install github.com/hljhljhlj/tern-scheduler
+# or, while developing:
+tern plugin link ~/Project/tern-scheduler
+tern plugin list --json     # status: ready, no problems
+```
 
-## Behaviour
+Reload after edits: `tern plugin reload scheduler`.
 
-- **Schedule** — every 6 hours, kept as `state.next` in the plugin's `kv.json`,
-  so it survives plugin reloads and Tern restarts. A run between due and two
-  hours late is delivered late; beyond that it is recorded as `missed` and the
-  next slot is armed.
-- **Target block** — resolved by, in order: the pinned pane id, a pane titled
-  `patrol`, else a new agent block opened with the prompt (`cwd ~/Project`,
-  new tab).
-- **Delivery** — `cx.agents:ask(pane, prompt)`. Native omp receives one atomic
-  TSP send; the prompt queues until the block can take it.
-- **History** — the last ten runs (`opened`, `sent`, `manual`, `failed`,
-  `missed`) live in `kv.json` and show up in `Patrol: status`.
+## Tasks
 
-## Why the window half schedules
+`tasks.json` holds one entry per task:
 
-Tern's durable task API (`tern.carly.schedule`) runs its `check` inside Carly's
-VM, where `tern.plugin.dir` and `tern.kv` resolve to Carly's directory and store.
-The prompt and the pinned pane therefore cannot be reached from a check. The
-window half keeps the clock itself: a 30 s timer, `state.next` in the plugin's
-own `kv.json`, and the same `agents:ask` path the commands use.
+```json
+[
+  {
+    "id": "pityplan",
+    "title": "pityplan patrol",
+    "every": "6h",
+    "prompt": "prompts/pityplan.md",
+    "cwd": "~/Project"
+  }
+]
+```
+
+- `every` — `30s`, `10m`, `6h`, `1d`.
+- `prompt` — the file delivered into the block (relative to the plugin).
+- `cwd` — working directory used when a block has to be opened.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `Patrol: run now` | Deliver `prompt.md` immediately, keeping the schedule |
-| `Patrol: pin this block` | Use the focused agent block as the target |
-| `Patrol: status` | Toast the next run and the last outcome |
+| `Scheduler: tasks` | List every task with its next run and last outcome; Enter runs one now |
+| `Scheduler: pin this block` | Give the focused agent block to a task |
+| `Scheduler: status` | Toast the task count and the nearest run |
 
-## Install
+`Scheduler: tasks` is the way to see what is scheduled at any moment.
 
-```bash
-tern plugin link ~/Project/tern-patrol-plugin
-tern plugin list --json     # status: ready, no problems
-```
+## Behaviour
 
-Reload after edits:
+- **Schedule** — each task keeps `next` in the plugin's `kv.json`, so reloads
+  and Tern restarts do not lose the slot. A run between due and two hours late
+  is delivered late; beyond that it is recorded as `missed` and the next slot
+  is armed.
+- **Target block** — resolved by, in order: the pinned pane id, a pane matching
+  the task id or title, else a new agent block opened with the prompt.
+- **Delivery** — `cx.agents:ask(pane, prompt)`. Native omp receives one atomic
+  TSP send; the prompt queues until the block can take it.
+- **One owner** — a single window holds the schedule through a heartbeat;
+  another window takes over once the heartbeat is 15 minutes stale. A due slot
+  is claimed before delivery, so two windows cannot double-run a task.
+- **History** — the last ten runs per task (`opened`, `sent`, `manual`,
+  `failed`, `missed`) live in `kv.json` and show up in `Scheduler: tasks`.
 
-```bash
-tern plugin reload patrol
-```
+The window half schedules because Tern's durable-task `check` runs in Carly's
+VM, where `tern.plugin.dir` and `tern.kv` resolve to Carly's directory.
 
 ## Test mode
 
-`touch test-once` next to the manifest switches the interval to one minute and
-uses `test-prompt.md` instead of the real prompt:
+`touch test-once` next to the manifest switches every interval to one minute
+and reads `<prompt>.test.md` instead of the real prompt:
 
 ```bash
-tern plugin reload patrol
+tern plugin reload scheduler
 ```
 
-Remove `test-once` and reload to restore the six-hour schedule.
+Remove `test-once` and reload to restore the configured intervals.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
