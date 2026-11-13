@@ -57,14 +57,28 @@ Reload after edits: `tern plugin reload scheduler`.
 - **Schedule** — each task keeps `next` in the plugin's `kv.json`, so reloads
   and Tern restarts do not lose the slot. A run between due and two hours late
   is delivered late; beyond that it is recorded as `missed` and the next slot
-  is armed.
-- **Target block** — resolved by, in order: the pinned pane id, a pane matching
-  the task id or title, else a new agent block opened with the prompt.
+  is armed. Changing `every` re-arms the next slot at the new interval; state
+  written before a task had an interval keeps its armed slot. Intervals below
+  30 seconds are rejected, and an unreadable `tasks.json` is reported instead
+  of silently running nothing.
+- **At-most-once delivery** — a due slot is claimed in `kv.json` *before*
+  anything is sent: the claim is saved, re-read, and only the window whose
+  token survived delivers. A crash can lose a run, never duplicate one, and
+  two windows cannot double-deliver the same slot.
+- **Target block** — resolved by, in order: the pinned pane id (checked
+  against a conversation fingerprint, so a block that switched to another
+  conversation is reopened instead of prompted), a pane inside
+  `place.session`/`place.tab` when configured, else — with no `place` — a pane
+  matching the task id or title at the task's own `cwd`. Failing all that, a
+  new agent block is opened with the prompt and moved to `place`; if the move
+  fails the run records the reason and toasts instead of reporting a clean
+  `opened`.
 - **Delivery** — `cx.agents:ask(pane, prompt)`. Native omp receives one atomic
   TSP send; the prompt queues until the block can take it.
 - **One owner** — a single window holds the schedule through a heartbeat;
-  another window takes over once the heartbeat is 15 minutes stale. A due slot
-  is claimed before delivery, so two windows cannot double-run a task.
+  another window takes over once the heartbeat is 15 minutes stale. A failed
+  tick (a transient store error, say) is logged and the schedule keeps
+  ticking.
 - **History** — the last ten runs per task (`opened`, `sent`, `manual`,
   `failed`, `missed`) live in `kv.json` and show up in `Scheduler: tasks`.
 

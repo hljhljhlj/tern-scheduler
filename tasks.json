@@ -9,5 +9,16 @@
 			"session": "patrol",
 			"tab": "patrol"
 		}
+	},
+	{
+		"id": "zhihu",
+		"title": "zhihu patrol",
+		"every": "4h",
+		"prompt": "prompts/zhihu.md",
+		"cwd": "~/Project",
+		"place": {
+			"session": "patrol",
+			"tab": "zhihu"
+		}
 	}
 ]

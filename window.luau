@@ -2,10 +2,21 @@
 -- delivers its prompt into one fixed agent block per task.
 local TICK_MS = 30 * 1000
 local LATE_MS = 2 * 3600 * 1000
+local MIN_INTERVAL_MS = 30 * 1000
 local HISTORY = 10
 local OWNER_STALE_MS = 15 * 60 * 1000
 local HEARTBEAT_MS = 5 * 60 * 1000
 local UNITS = { s = 1000, m = 60 * 1000, h = 3600 * 1000, d = 24 * 3600 * 1000 }
+local warned = {}
+
+local function warn_once(key, text)
+	if warned[key] then
+		return false
+	end
+	warned[key] = true
+	tern.log.warn("scheduler: " .. text)
+	return true
+end
 
 local function now_ms()
 	return os.time() * 1000
@@ -27,14 +38,16 @@ local function task_state(s, id)
 	return s.tasks[id]
 end
 
+-- Returns the task list, or nil plus a reason when the configuration cannot be
+-- read. The caller surfaces the reason instead of silently doing nothing.
 local function tasks()
 	local ok, raw = pcall(tern.fs.read, tern.plugin.dir .. "/tasks.json")
 	if not ok then
-		return {}
+		return nil, "cannot read tasks.json: " .. tostring(raw)
 	end
 	local ok_json, parsed = pcall(tern.json.decode, raw)
 	if not ok_json or type(parsed) ~= "table" then
-		return {}
+		return nil, "tasks.json is not a JSON array"
 	end
 	return parsed
 end
@@ -51,7 +64,11 @@ local function interval_ms(task)
 	if not n then
 		return nil
 	end
-	return tonumber(n) * UNITS[unit]
+	local ms = tonumber(n) * UNITS[unit]
+	if ms < MIN_INTERVAL_MS then
+		return nil
+	end
+	return ms
 end
 
 local function prompt_text(task)
@@ -70,14 +87,88 @@ local function usable(cx, pane)
 	return info ~= nil and info.kind == "agent"
 end
 
+local function hash_tail(text)
+	local h = 5381
+	for i = 1, #text do
+		h = (h * 33 + string.byte(text, i)) % 2147483647
+	end
+	return h
+end
+
+-- Conversation fingerprint: message count plus a hash of the last message. A
+-- block that switched to a different conversation no longer matches, so the
+-- task reopens its own block instead of prompting a stranger's chat.
+local function fingerprint(cx, pane)
+	local ok, list = pcall(cx.agents.transcript, cx.agents, pane, { last = 1000 })
+	if not ok or type(list) ~= "table" then
+		return nil
+	end
+	local last = list[#list]
+	return { n = #list, tail = hash_tail(last and last.text or "") }
+end
+
+-- An empty transcript means "unknown", not "a different conversation": a
+-- fingerprint captured before the block took its first prompt must never
+-- trigger a reopen.
+local function fp_matches(fp, now_fp)
+	if fp == nil or fp.n == 0 or now_fp == nil then
+		return true
+	end
+	return now_fp.n == fp.n and now_fp.tail == fp.tail
+end
+
+-- Agent panes inside task.place's session (and tab, when named). The title
+-- fallback only ever considers these, so a same-named pane elsewhere can no
+-- longer receive the prompt.
+local function scoped_panes(cx, task)
+	local place = type(task.place) == "table" and task.place or nil
+	if not place or not place.session then
+		return nil
+	end
+	local session = cx.session:find_session(tostring(place.session))
+	if not session then
+		return {}
+	end
+	local tabs = {}
+	for _, tab in ipairs(cx.session:tabs()) do
+		if tab.session == session and (not place.tab or tab.name == tostring(place.tab)) then
+			tabs[tab.id] = true
+		end
+	end
+	local panes = {}
+	for _, info in ipairs(cx.session:panes()) do
+		if tabs[info.tab] and info.kind == "agent" then
+			panes[#panes + 1] = info
+		end
+	end
+	return panes
+end
+
 local function target(cx, task, ts)
 	if usable(cx, ts.pane) then
-		return ts.pane
+		if fp_matches(ts.fp, fingerprint(cx, ts.pane)) then
+			return ts.pane
+		end
+		warn_once("drift:" .. task.id, task.id .. ": pinned block changed conversation; reopening")
+		return nil
 	end
+	local scoped = scoped_panes(cx, task)
+	if scoped then
+		for _, info in ipairs(scoped) do
+			if fp_matches(ts.fp, fingerprint(cx, info.pane)) then
+				return info.pane
+			end
+		end
+		return nil
+	end
+	-- No placement configured: title lookup, but only at the task's own cwd.
 	for _, spec in ipairs({ task.id, task.title }) do
 		local resolved = cx.session:resolve(tostring(spec))
 		if usable(cx, resolved) then
-			return resolved
+			local info = cx.session:pane(resolved)
+			if not task.cwd or info.cwd == task.cwd then
+				return resolved
+			end
 		end
 	end
 	return nil
@@ -143,20 +234,60 @@ local function place_block(cx, pane, p)
 	return moved ~= nil
 end
 
+-- Returns pane, created, note. note is set when the block opened but could not
+-- be moved to task.place, so the caller can surface it instead of reporting a
+-- clean "opened".
 local function deliver(cx, task, ts, prompt)
 	local pane = target(cx, task, ts)
 	if pane then
 		cx.agents:ask(pane, prompt)
-		return pane, false
+		return pane, false, nil
 	end
 	local created = cx.agents:start({ prompt = prompt, cwd = task.cwd or "~", how = "tab" })
+	local note
 	if type(task.place) == "table" then
-		local ok, err = pcall(place_block, cx, created, task.place)
+		local ok, placed = pcall(place_block, cx, created, task.place)
 		if not ok then
-			tern.log.warn(task.id .. ": place failed: " .. tostring(err))
+			note = "place error: " .. tostring(placed)
+		elseif not placed then
+			note = "place failed; block stays in the current session"
 		end
 	end
-	return created, true
+	return created, true, note
+end
+
+-- The prompt lands in the block's transcript only after the block takes it,
+-- so the fingerprint is retried with growing delays until the transcript is
+-- non-empty.
+local function refresh_fp(task_id, pane)
+	local delays = { 4000, 11000, 30000, 60000 }
+	local function attempt(i)
+		tern.timer(delays[i], function(cx)
+			local settled = false
+			local ok = pcall(function()
+				local fp = fingerprint(cx, pane)
+				if fp and fp.n > 0 then
+					local s = state()
+					local ts = task_state(s, task_id)
+					if ts.pane == pane then
+						ts.fp = fp
+						save(s)
+					end
+					settled = true
+				end
+			end)
+			if not ok then
+				warn_once("fp:" .. task_id, task_id .. ": fingerprint refresh failed")
+				settled = true
+			end
+			if not settled and i < #delays then
+				attempt(i + 1)
+			elseif not settled then
+				warn_once("fp:" .. task_id, task_id .. ": transcript still empty; fingerprint left unknown")
+			end
+		end)
+	end
+	attempt(1)
 end
 
 local function record(ts, outcome, detail)
@@ -193,7 +324,9 @@ local function own(cx, s, now)
 	return true, true
 end
 
--- Claims the slot before delivering, so a second window cannot double-run it.
+-- A due slot is claimed in kv before anything is delivered: the claim (the new
+-- next) is saved first, re-read, and only the window whose token survived
+-- delivers. A crash can therefore lose a run, never duplicate one.
 local function run_task(cx, task, s, now)
 	local ts = task_state(s, task.id)
 	local interval = interval_ms(task)
@@ -201,49 +334,96 @@ local function run_task(cx, task, s, now)
 		return false
 	end
 	local dirty = false
+	if ts.interval ~= interval then
+		local had_interval = type(ts.interval) == "number"
+		ts.interval = interval
+		-- Adopt the interval without moving an already-armed slot (state written
+		-- by older versions has no interval); recompute only real changes.
+		if had_interval or type(ts.next) ~= "number" then
+			ts.next = now + interval
+		end
+		dirty = true
+	end
 	if type(ts.next) ~= "number" then
 		ts.next = now + interval
 		return true
 	end
-	local now2 = now_ms()
-	if now2 < ts.next then
-		return false
+	if now < ts.next then
+		return dirty
 	end
 	local due = ts.next
-	ts.next = now2 + interval
-	dirty = true
-	if now2 - due > LATE_MS then
-		record(ts, "missed")
-	else
-		local ok, pane, created = pcall(function()
-			return deliver(cx, task, ts, prompt_text(task))
-		end)
-		if ok then
-			ts.pane = pane
-			record(ts, created and "opened" or "sent")
-		else
-			record(ts, "failed", tostring(pane))
-			cx:toast("error", task.id .. ": run failed", tostring(pane))
-		end
+	ts.next = now + interval
+	local token = tostring(now) .. ":" .. cx:window_key()
+	ts.claim = token
+	local saved = pcall(save, s)
+	if not saved then
+		-- The claim never reached disk; forget it and retry on the next tick.
+		ts.next = due
+		ts.claim = nil
+		return false
 	end
-	return dirty
+	local fresh = state()
+	local fts = ((fresh.tasks or {})[task.id])
+	if type(fts) ~= "table" or fts.claim ~= token then
+		return false
+	end
+	if now - due > LATE_MS then
+		record(ts, "missed")
+		save(s)
+		return true
+	end
+	local ok, pane, created, note = pcall(deliver, cx, task, ts, prompt_text(task))
+	if ok then
+		ts.pane = pane
+		record(ts, created and "opened" or "sent", note)
+		if note then
+			cx:toast("error", task.id .. ": " .. note, nil)
+		end
+		refresh_fp(task.id, pane)
+	else
+		record(ts, "failed", tostring(pane))
+		cx:toast("error", task.id .. ": run failed", tostring(pane))
+	end
+	save(s)
+	return true
 end
 
 local function tick(cx)
-	local s = state()
-	local now = now_ms()
-	local owns, dirty = own(cx, s, now)
-	if dirty then
-		save(s)
-	end
-	if owns then
-		for _, task in ipairs(tasks()) do
-			local ok, changed = pcall(run_task, cx, task, s, now_ms())
-			dirty = dirty or (ok and changed)
+	local ok, err = pcall(function()
+		local s = state()
+		local now = now_ms()
+		local owns, dirty = own(cx, s, now)
+		if dirty then
+			save(s)
+		end
+		if not owns then
+			return
+		end
+		local list, cfg_err = tasks()
+		if cfg_err then
+			if warn_once("config", cfg_err) then
+				cx:toast("error", "scheduler: " .. cfg_err, nil)
+			end
+			return
+		end
+		for _, task in ipairs(list) do
+			if type(task) == "table" and type(task.id) == "string" then
+				if not interval_ms(task) then
+					if warn_once("every:" .. task.id, task.id .. ": bad every " .. tostring(task.every)) then
+						cx:toast("error", "scheduler: " .. task.id .. ": bad every " .. tostring(task.every), nil)
+					end
+				else
+					local ok_run, changed = pcall(run_task, cx, task, s, now_ms())
+					dirty = dirty or (ok_run and changed)
+				end
+			end
 		end
 		if dirty then
 			save(s)
 		end
+	end)
+	if not ok then
+		tern.log.warn("scheduler: tick failed: " .. tostring(err))
 	end
 	tern.timer(TICK_MS, tick)
 end
@@ -279,19 +459,24 @@ tern.command({
 				return
 			end
 			local task = choice.task
-			local ok, pane, created = pcall(function()
+			local ok, pane, created, note = pcall(function()
 				local s = state()
 				local ts = task_state(s, task.id)
-				local pane, created = deliver(pick_cx, task, ts, prompt_text(task))
-				record(ts, "manual")
+				local pane, created, note = deliver(pick_cx, task, ts, prompt_text(task))
+				ts.pane = pane
+				record(ts, "manual", note)
 				save(s)
-				return pane, created
+				return pane, created, note
 			end)
-			if ok then
-				pick_cx:toast("info", task.id .. ": 已投递", created and ("新 block " .. pane) or ("block " .. pane))
-			else
+			if not ok then
 				pick_cx:toast("error", task.id .. ": run failed", tostring(pane))
+				return
 			end
+			refresh_fp(task.id, pane)
+			if note then
+				pick_cx:toast("error", task.id .. ": " .. note, nil)
+			end
+			pick_cx:toast("info", task.id .. ": 已投递", created and ("新 block " .. pane) or ("block " .. pane))
 		end)
 	end,
 })
@@ -321,7 +506,9 @@ tern.command({
 				return
 			end
 			local s = state()
-			task_state(s, choice.task.id).pane = focused
+			local ts = task_state(s, choice.task.id)
+			ts.pane = focused
+			ts.fp = fingerprint(pick_cx, focused)
 			save(s)
 			pick_cx:toast("success", choice.task.id .. ": 目标已固定", "pane " .. focused)
 		end)

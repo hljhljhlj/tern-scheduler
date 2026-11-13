@@ -1,6 +1,6 @@
 schema = 1
 id = "scheduler"
 name = "Prompt Scheduler"
-version = "0.2.0"
+version = "0.3.0"
 description = "Timed prompts delivered to fixed omp agent blocks."
 window = "window.luau"
