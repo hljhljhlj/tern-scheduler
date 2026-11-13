@@ -36,6 +36,11 @@ Reload after edits: `tern plugin reload scheduler`.
 - `every` — `30s`, `10m`, `6h`, `1d`.
 - `prompt` — the file delivered into the block (relative to the plugin).
 - `cwd` — working directory used when a block has to be opened.
+- `place` — optional `{ "session": "name", "tab": "name" }`: when a block has to
+  be opened, it is moved into that session (created if missing) and that tab
+  (created and named if missing), instead of a new tab in whatever session
+  happens to be current. Either key may be omitted; a fresh session's birth
+  shell tab is closed once the block is in place.
 
 ## Commands
 

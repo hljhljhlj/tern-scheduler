@@ -4,6 +4,10 @@
 		"title": "pityplan patrol",
 		"every": "6h",
 		"prompt": "prompts/pityplan.md",
-		"cwd": "~/Project"
+		"cwd": "~/Project",
+		"place": {
+			"session": "patrol",
+			"tab": "patrol"
+		}
 	}
 ]

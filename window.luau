@@ -83,6 +83,66 @@ local function target(cx, task, ts)
 	return nil
 end
 
+-- Moves a freshly opened block to where task.place asks for it:
+--   { "session": "name" }                     a dedicated session (created if missing)
+--   { "session": "name", "tab": "name" }      ... into that session's tab (created if missing)
+--   { "tab": "name" }                         that tab in the current session
+local function plain_shell(cx, tab)
+	for _, info in ipairs(cx.session:panes()) do
+		if info.tab == tab and info.command == nil and info.program ~= nil then
+			return info.pane
+		end
+	end
+	return nil
+end
+
+local function place_block(cx, pane, p)
+	local session, born_tab
+	if p.session then
+		session = cx.session:find_session(tostring(p.session))
+		if not session then
+			local made = cx.sessions:create({ name = tostring(p.session) })
+			session = made and made.id
+			-- A new session is born with one empty shell tab; remember it so the
+			-- block's own tab can replace it.
+			for _, info in ipairs(cx.session:sessions()) do
+				if info.id == session then
+					born_tab = info.tabs and info.tabs[1]
+				end
+			end
+		end
+	else
+		local current = cx.sessions:current()
+		session = current and current.id
+	end
+	if not session then
+		return false
+	end
+	local moved
+	if p.tab then
+		local tab = cx.session:find_tab(tostring(p.tab), session)
+		if tab then
+			moved = cx.layout:move_to_tab(pane, tab, { focus = false }) and tab
+		end
+	end
+	if not moved then
+		local tab = cx.layout:move_to_new_tab(pane, session, { focus = false })
+		if tab and p.tab then
+			cx.layout:name_tab(tab, tostring(p.tab))
+		end
+		moved = tab
+	end
+	if born_tab and moved ~= born_tab then
+		local shell = plain_shell(cx, born_tab)
+		if shell then
+			pcall(function()
+				cx.layout:close(shell)
+			end)
+		end
+	end
+	return moved ~= nil
+end
+
 local function deliver(cx, task, ts, prompt)
 	local pane = target(cx, task, ts)
 	if pane then
@@ -90,6 +150,12 @@ local function deliver(cx, task, ts, prompt)
 		return pane, false
 	end
 	local created = cx.agents:start({ prompt = prompt, cwd = task.cwd or "~", how = "tab" })
+	if type(task.place) == "table" then
+		local ok, err = pcall(place_block, cx, created, task.place)
+		if not ok then
+			tern.log.warn(task.id .. ": place failed: " .. tostring(err))
+		end
+	end
 	return created, true
 end
 
