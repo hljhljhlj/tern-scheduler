@@ -17,6 +17,10 @@ tern plugin list --json     # status: ready, no problems
 
 Reload after edits: `tern plugin reload scheduler`.
 
+Real prompts and `tasks.json` are yours alone: both are gitignored, and the
+repository ships `tasks.example.json` plus `prompts/example.md` as templates.
+Copy them to `tasks.json` and your own prompt files to get started.
+
 ## Tasks
 
 `tasks.json` holds one entry per task:

@@ -1,0 +1,3 @@
+tasks.json
+prompts/*
+!prompts/example.md

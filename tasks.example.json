@@ -1,0 +1,9 @@
+[
+	{
+		"id": "example",
+		"title": "example task",
+		"every": "1h",
+		"prompt": "prompts/example.md",
+		"cwd": "~"
+	}
+]
