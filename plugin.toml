@@ -1,0 +1,6 @@
+schema = 1
+id = "patrol"
+name = "PityPlan Patrol"
+version = "0.1.0"
+description = "Scheduled prompt into a fixed omp block."
+window = "window.luau"
