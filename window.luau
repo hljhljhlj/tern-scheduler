@@ -5,6 +5,7 @@ local MIN_INTERVAL_MS = 30 * 1000
 local HISTORY = 10
 local OWNER_STALE_MS = 15 * 60 * 1000
 local HEARTBEAT_MS = 5 * 60 * 1000
+local FP_WINDOW = 1000
 local UNITS = { s = 1000, m = 60 * 1000, h = 3600 * 1000, d = 24 * 3600 * 1000 }
 local warned = {}
 
@@ -99,7 +100,7 @@ end
 -- A block that switched to a different conversation shrinks or changes head,
 -- and the task reopens its own block instead of prompting a stranger's chat.
 local function fingerprint(cx, pane)
-	local ok, list = pcall(cx.agents.transcript, cx.agents, pane, { last = 100000 })
+	local ok, list = pcall(cx.agents.transcript, cx.agents, pane, { last = FP_WINDOW })
 	if not ok or type(list) ~= "table" then
 		return nil
 	end
@@ -107,10 +108,14 @@ local function fingerprint(cx, pane)
 	return { n = #list, head = hash_tail(first and first.text or "") }
 end
 
--- An empty transcript or a fingerprint without a head is "unknown", not "a
--- different conversation": never reopen because of one.
+-- An empty transcript, a fingerprint without a head, or a transcript longer
+-- than the window (whose first message is no longer visible) is "unknown", not
+-- "a different conversation": never reopen because of one.
 local function fp_matches(fp, now_fp)
 	if fp == nil or fp.n == 0 or fp.head == nil or now_fp == nil or now_fp.n == 0 then
+		return true
+	end
+	if now_fp.n >= FP_WINDOW then
 		return true
 	end
 	return now_fp.n >= fp.n and now_fp.head == fp.head
