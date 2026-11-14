@@ -1,7 +1,6 @@
 -- Prompt Scheduler, window half: keeps each task's next run in tern.kv and
 -- delivers its prompt into one fixed agent block per task.
 local TICK_MS = 30 * 1000
-local LATE_MS = 2 * 3600 * 1000
 local MIN_INTERVAL_MS = 30 * 1000
 local HISTORY = 10
 local OWNER_STALE_MS = 15 * 60 * 1000
@@ -95,26 +94,26 @@ local function hash_tail(text)
 	return h
 end
 
--- Conversation fingerprint: message count plus a hash of the last message. A
--- block that switched to a different conversation no longer matches, so the
--- task reopens its own block instead of prompting a stranger's chat.
+-- Conversation fingerprint: message count plus a hash of the first message.
+-- Conversations only grow, so the count may rise and the head must stay put.
+-- A block that switched to a different conversation shrinks or changes head,
+-- and the task reopens its own block instead of prompting a stranger's chat.
 local function fingerprint(cx, pane)
-	local ok, list = pcall(cx.agents.transcript, cx.agents, pane, { last = 1000 })
+	local ok, list = pcall(cx.agents.transcript, cx.agents, pane, { last = 100000 })
 	if not ok or type(list) ~= "table" then
 		return nil
 	end
-	local last = list[#list]
-	return { n = #list, tail = hash_tail(last and last.text or "") }
+	local first = list[1]
+	return { n = #list, head = hash_tail(first and first.text or "") }
 end
 
--- An empty transcript means "unknown", not "a different conversation": a
--- fingerprint captured before the block took its first prompt must never
--- trigger a reopen.
+-- An empty transcript or a fingerprint without a head is "unknown", not "a
+-- different conversation": never reopen because of one.
 local function fp_matches(fp, now_fp)
-	if fp == nil or fp.n == 0 or now_fp == nil then
+	if fp == nil or fp.n == 0 or fp.head == nil or now_fp == nil or now_fp.n == 0 then
 		return true
 	end
-	return now_fp.n == fp.n and now_fp.tail == fp.tail
+	return now_fp.n >= fp.n and now_fp.head == fp.head
 end
 
 -- Agent panes inside task.place's session (and tab, when named). The title
@@ -366,11 +365,6 @@ local function run_task(cx, task, s, now)
 	local fts = ((fresh.tasks or {})[task.id])
 	if type(fts) ~= "table" or fts.claim ~= token then
 		return false
-	end
-	if now - due > LATE_MS then
-		record(ts, "missed")
-		save(s)
-		return true
 	end
 	local ok, pane, created, note = pcall(deliver, cx, task, ts, prompt_text(task))
 	if ok then

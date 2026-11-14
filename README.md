@@ -59,10 +59,10 @@ Copy them to `tasks.json` and your own prompt files to get started.
 ## Behaviour
 
 - **Schedule** — each task keeps `next` in the plugin's `kv.json`, so reloads
-  and Tern restarts do not lose the slot. A run between due and two hours late
-  is delivered late; beyond that it is recorded as `missed` and the next slot
-  is armed. Changing `every` re-arms the next slot at the new interval; state
-  written before a task had an interval keeps its armed slot. Intervals below
+  and Tern restarts do not lose the slot: a slot that came due while Tern was
+  down runs on the next tick, and the following slot is armed from now.
+  Changing `every` re-arms the next slot at the new interval; state written
+  before a task had an interval keeps its armed slot. Intervals below
   30 seconds are rejected, and an unreadable `tasks.json` is reported instead
   of silently running nothing.
 - **At-most-once delivery** — a due slot is claimed in `kv.json` *before*
@@ -70,8 +70,9 @@ Copy them to `tasks.json` and your own prompt files to get started.
   token survived delivers. A crash can lose a run, never duplicate one, and
   two windows cannot double-deliver the same slot.
 - **Target block** — resolved by, in order: the pinned pane id (checked
-  against a conversation fingerprint, so a block that switched to another
-  conversation is reopened instead of prompted), a pane inside
+  against a conversation fingerprint — the first message plus a message count,
+  which only grows — so a block that switched to another conversation is
+  reopened instead of prompted), a pane inside
   `place.session`/`place.tab` when configured, else — with no `place` — a pane
   matching the task id or title at the task's own `cwd`. Failing all that, a
   new agent block is opened with the prompt and moved to `place`; if the move
@@ -84,7 +85,7 @@ Copy them to `tasks.json` and your own prompt files to get started.
   tick (a transient store error, say) is logged and the schedule keeps
   ticking.
 - **History** — the last ten runs per task (`opened`, `sent`, `manual`,
-  `failed`, `missed`) live in `kv.json` and show up in `Scheduler: tasks`.
+  `failed`) live in `kv.json` and show up in `Scheduler: tasks`.
 
 The window half schedules because Tern's durable-task `check` runs in Carly's
 VM, where `tern.plugin.dir` and `tern.kv` resolve to Carly's directory.
